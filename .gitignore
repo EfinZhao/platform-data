@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# API tokens
+.secrets.toml
+
+# logged data and plots
+/data/*
+/analysis/plots/*
+nc_log*
+ping_log*
+*.jsonl
+latency_processed.csv
+
+# misc
+.DS_Store

@@ -1,0 +1,15 @@
+[project]
+name = "platform-data"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "parquet-tools>=0.2.16",
+    "pyarrow>=24.0.0",
+    "bctrealtimesdk-subscriber",
+    "altair>=6.2.2",
+    "vl-convert-python>=1.9.0.post1",
+]
+[tool.uv.sources]
+bctrealtimesdk-subscriber = { path = "./lib/bctRealtimeSDK_Subscriber-3.1.0-py3-none-any.whl" }
