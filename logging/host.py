@@ -60,6 +60,11 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
     r.append(f'<html><head><title> Directory listing for {displaypath}</title></head>')
     r.append(f'<body>\n<h2>Directory listing for {displaypath}</h2>')
     r.append('<hr>\n<ul>')
+
+    displaypath_unquoted = urllib.parse.unquote(self.path, errors="surrogatepass")
+    if displaypath_unquoted.rstrip("/") not in ("", "/"):
+      r.append('<li><a href="../">..</a></li>')
+
     for name in list_:
       fullname = os.path.join(path, name)
       displayname = name
@@ -189,7 +194,7 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
   def handle_parquet_view(self):
     parsed = urllib.parse.urlparse(self.path)
     local_path = self.translate_path(parsed.path)
-      
+
     if not os.path.isfile(local_path):
       self.send_error(404, "File not found")
       return
