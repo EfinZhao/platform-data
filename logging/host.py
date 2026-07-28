@@ -4,12 +4,14 @@ import sys
 import http.server
 import html
 import urllib.parse
+import json
+import pandas as pd
 import shutil
 import socketserver
 import tempfile
 import zipfile
 
-PORT = 8001
+PORT = 8000
 DIRECTORY = "rt"
 
 class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
@@ -60,8 +62,8 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
     r.append('<hr>\n<ul>')
     for name in list_:
       fullname = os.path.join(path, name)
-      displayname = name + "/"
-      linkname    = name + "/"
+      displayname = name
+      linkname    = name
       if os.path.isdir(fullname):
         displayname = name + "/"
         linkname = name + "/"
@@ -184,12 +186,65 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
       except OSError:
         pass
 
+  def handle_parquet_view(self):
+    parsed = urllib.parse.urlparse(self.path)
+    local_path = self.translate_path(parsed.path)
+      
+    if not os.path.isfile(local_path):
+      self.send_error(404, "File not found")
+      return
+
+    query = urllib.parse.parse_qs(parsed.query)
+    full = query.get("full", ["0"])[0] == "1"
+    try:
+      limit = int(query.get("limit", ["1000"])[0])
+      offset = int(query.get("offset", ["0"])[0])
+    except ValueError:
+      limit, offset = 1000, 0
+
+    try:
+      df = pd.read_parquet(local_path)
+    except Exception as e:
+      self.send_error(500, f"Failed to read parquet file: {e}")
+      return
+
+    total_rows = len(df)
+
+    if not full:
+      df_view = df.iloc[offset: offset + limit]
+    else:
+      df_view = df
+
+    records_json = df_view.to_json(orient="records", date_format="iso")
+    records = json.loads(records_json)
+
+    payload = {
+      "file": os.path.basename(local_path),
+      "total_rows": len(records),
+      "offset": offset if not full else 0,
+      "limit": limit if not full else total_rows,
+      "columns": list(df.columns.astype(str)),
+      "data": records,
+    }
+
+    body = json.dumps(payload, indent=2).encode("utf-8")
+
+    self.send_response(200)
+    self.send_header("Content-type", "application/json; charset=utf-8")
+    self.send_header("Content-Length", str(len(body)))
+    self.end_headers()
+    self.wfile.write(body)
+
   def do_GET(self):
     parsed = urllib.parse.urlparse(self.path)
     query = urllib.parse.parse_qs(parsed.query)
-
+    
     if query.get("download") == ["zip"]:
       self.handle_zip_download()
+      return
+
+    if parsed.path.lower().endswith(".parquet"):
+      self.handle_parquet_view()
       return
 
     super().do_GET()
