@@ -14,6 +14,7 @@ wheels/
 
 # logged data and plots
 /data/*
+!/data/host.py
 /analysis/plots/*
 nc_log*
 ping_log*
