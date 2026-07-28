@@ -19,6 +19,7 @@ nc_log*
 ping_log*
 *.jsonl
 latency_processed.csv
+/logging/data/*
 
 # misc
 .DS_Store
