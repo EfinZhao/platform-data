@@ -11,7 +11,7 @@ import socketserver
 import tempfile
 import zipfile
 
-PORT = 8000
+PORT = 8001
 DIRECTORY = "rt"
 
 class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
@@ -48,6 +48,7 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
     except OSError:
       self.send_error(404, "No permission to list directory")
       return None
+
     list_.sort(key=lambda a: a.lower())
 
     displaypath = urllib.parse.unquote(self.path)
@@ -57,9 +58,12 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
 
     r = []
     r.append('<!DOCTYPE HTML>')
-    r.append(f'<html><head><title> Directory listing for {displaypath}</title></head>')
+    r.append(f'<html><head>')
+    r.append(f'<meta charset="{enc}">')
+    r.append(f'<title> Directory listing for {displaypath}</title>')
+    r.append(f'</head>')
     r.append(f'<body>\n<h2>Directory listing for {displaypath}</h2>')
-    r.append('<hr>\n<ul>')
+    r.append('<hr>\n<ul class="checkbox-list">')
 
     displaypath_unquoted = urllib.parse.unquote(self.path, errors="surrogatepass")
     if displaypath_unquoted.rstrip("/") not in ("", "/"):
@@ -72,7 +76,7 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
       if os.path.isdir(fullname):
         displayname = name + "/"
         linkname = name + "/"
-      r.append(f'<li><a href="{urllib.parse.quote(linkname)}">{html.escape(displayname)}</a></li>')
+      r.append(f'<li><input type="checkbox" name="subscribe"><a href="{urllib.parse.quote(linkname)}">{html.escape(displayname)}</a></li>')
     r.append('</ul>\n<hr>\n</body>\n</html>\n')
     html_content = "\n".join(r)
 
@@ -99,10 +103,12 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
         "  border-radius: 4px; font-family: sans-serif; font-size: 14px;"
         "}"
         ".download-btn:hover { background: #0056b3; }"
+        ".checkbox-list { list-style-type: none; padding-left: 0; }"
         "</style>"
       )
 
       current_path = self.path.split('?', 1)[0]
+
       if not current_path.endswith('/'):
         current_path += '/'
       download_href = current_path + "?download=zip"
