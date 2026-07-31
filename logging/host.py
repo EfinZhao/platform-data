@@ -1,17 +1,18 @@
-import io
-import os
-import sys
-import http.server
 import html
-import urllib.parse
+import http.server
+import io
 import json
-import pandas as pd
+import os
 import shutil
 import socketserver
+import sys
 import tempfile
+import urllib.parse
 import zipfile
 
-PORT = 8001
+import pandas as pd
+
+PORT = 8000
 DIRECTORY = "rt"
 
 class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
@@ -56,6 +57,10 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
 
     enc = sys.getfilesystemencoding()
 
+    current_path = self.path.split('?', 1)[0]
+    if not current_path.endswith('/'):
+      current_path += '/'
+
     r = []
     r.append('<!DOCTYPE HTML>')
     r.append(f'<html><head>')
@@ -63,7 +68,9 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
     r.append(f'<title> Directory listing for {displaypath}</title>')
     r.append(f'</head>')
     r.append(f'<body>\n<h2>Directory listing for {displaypath}</h2>')
-    r.append('<hr>\n<ul class="checkbox-list">')
+    r.append(f'<hr>\n<form method="GET" action="{html.escape(current_path)}">')
+    r.append('<input type="hidden" name="download" value="zip">')
+    r.append('<ul class="checkbox-list">')
 
     displaypath_unquoted = urllib.parse.unquote(self.path, errors="surrogatepass")
     if displaypath_unquoted.rstrip("/") not in ("", "/"):
@@ -76,8 +83,13 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
       if os.path.isdir(fullname):
         displayname = name + "/"
         linkname = name + "/"
-      r.append(f'<li><input type="checkbox" name="subscribe"><a href="{urllib.parse.quote(linkname)}">{html.escape(displayname)}</a></li>')
-    r.append('</ul>\n<hr>\n</body>\n</html>\n')
+      r.append(
+        f'<li><input type="checkbox" name="items" value="{html.escape(name)}">'
+        f'<a href="{urllib.parse.quote(linkname)}">{html.escape(displayname)}</a></li>'
+      )
+    r.append('</ul>')
+    r.append('<button type="submit" class="download-btn">Download Selected as ZIP</button>')
+    r.append('</form>\n<hr>\n</body>\n</html>\n')
     html_content = "\n".join(r)
 
     try:
@@ -98,19 +110,12 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
         "  background: #28a745; height: 100%;"
         "}"
         ".download-btn {"
-        "  display: inline-block; margin-top: 8px; padding: 6px 14px;"
-        "  background: #007bff; color: #fff; text-decoration: none;"
-        "  border-radius: 4px; font-family: sans-serif; font-size: 14px;"
+        "  cursor: pointer;"
         "}"
-        ".download-btn:hover { background: #0056b3; }"
         ".checkbox-list { list-style-type: none; padding-left: 0; }"
         "</style>"
       )
 
-      current_path = self.path.split('?', 1)[0]
-
-      if not current_path.endswith('/'):
-        current_path += '/'
       download_href = current_path + "?download=zip"
 
       used_percent = (used / total) * 100 if total > 0 else 0
@@ -118,7 +123,7 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
       banner_html = (
         f"{banner_style}"
         f"<a class='download-btn' href='{html.escape(download_href)}'>"
-        f"Download directory as ZIP</a><br>"
+        f"Download All as ZIP</a><br>"
         f"<strong>Directory Size:</strong> {dir_size}<br>"
         f"<strong>System Disk Space:</strong> Available: {free_space} / Total: {total_space}<br>"
         f"<div class='storage-bar'><div class='storage-progress' style='width: {used_percent:.1f}%'></div></div>"
@@ -144,15 +149,45 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
 
     return f
 
+  def _resolve_selected_items(self, local_path, names):
+    """Validate requested item names as direct children of local_path.
+
+    Rejects path separators, '..', and anything that resolves outside
+    local_path (e.g. via a symlink), so the selection can't be used to
+    reach files outside the served directory.
+    """
+    root = os.path.realpath(local_path)
+    resolved = []
+    for name in names:
+      if not name or os.path.basename(name) != name or name in (".", ".."):
+        continue
+      candidate = os.path.realpath(os.path.join(local_path, name))
+      if candidate != root and not candidate.startswith(root + os.sep):
+        continue
+      if os.path.exists(candidate):
+        resolved.append(candidate)
+    return resolved
+
   def handle_zip_download(self):
     parsed = urllib.parse.urlparse(self.path)
+    query = urllib.parse.parse_qs(parsed.query)
     local_path = self.translate_path(parsed.path)
 
     if not os.path.isdir(local_path):
         self.send_error(404, "Not a directory")
         return
 
+    requested_items = query.get("items")
+    if requested_items:
+      sources = self._resolve_selected_items(local_path, requested_items)
+      if not sources:
+        self.send_error(400, "No valid items selected")
+        return
+    else:
+      sources = [local_path]
+
     dir_name = os.path.basename(os.path.normpath(local_path)) or "root"
+    zip_name = f"{dir_name}_selected.zip" if requested_items else f"{dir_name}.zip"
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".zip")
     os.close(tmp_fd)
@@ -160,12 +195,20 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
     try:
       try:
         with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-          for root, dirs, files in os.walk(local_path):
-            for file in files:
-              file_path = os.path.join(root, file)
-              arcname = os.path.join(dir_name, os.path.relpath(file_path, local_path))
+          for src in sources:
+            if os.path.isdir(src):
+              for root, dirs, files in os.walk(src):
+                for file in files:
+                  file_path = os.path.join(root, file)
+                  arcname = os.path.join(dir_name, os.path.relpath(file_path, local_path))
+                  try:
+                    zf.write(file_path, arcname)
+                  except OSError:
+                    continue
+            else:
+              arcname = os.path.join(dir_name, os.path.relpath(src, local_path))
               try:
-                zf.write(file_path, arcname)
+                zf.write(src, arcname)
               except OSError:
                 continue
       except Exception:
@@ -176,7 +219,7 @@ class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
 
       self.send_response(200)
       self.send_header("Content-type", "application/zip")
-      self.send_header("Content-Disposition", f'attachment; filename="{dir_name}.zip"')
+      self.send_header("Content-Disposition", f'attachment; filename="{zip_name}"')
       self.send_header("Content-Length", str(zip_size))
       self.end_headers()
 
