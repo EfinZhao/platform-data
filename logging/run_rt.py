@@ -1,7 +1,9 @@
-from logger_rt import logger
-import time
-import pandas as pd
 import threading
+import time
+
+import pandas as pd
+from logger_rt import logger
+
 
 def main():
     threads = []
