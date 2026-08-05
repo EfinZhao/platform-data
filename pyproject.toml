@@ -10,6 +10,12 @@ dependencies = [
     "bctrealtimesdk-subscriber",
     "altair>=6.2.2",
     "vl-convert-python>=1.9.0.post1",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.1",
+    "python-dotenv>=1.2.2",
+    "requests>=2.34.2",
+    "protobuf>=4.23.4",
+    "pydantic>=2.13.4",
 ]
 [tool.uv.sources]
 bctrealtimesdk-subscriber = { path = "./lib/bctRealtimeSDK_Subscriber-3.1.0-py3-none-any.whl" }
