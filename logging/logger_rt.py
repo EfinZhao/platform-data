@@ -4,12 +4,15 @@ import threading
 import time
 import tomllib
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from realtime_subscriber.Realtime_subscriber_api import BCTWSConnection
 
-with open(".secrets.toml", "rb") as file:
+_MODULE_DIR = Path(__file__).resolve().parent
+
+with open(_MODULE_DIR / ".secrets.toml", "rb") as file:
     secrets = tomllib.load(file)
 
 logging.basicConfig(
@@ -23,7 +26,7 @@ log = logging.getLogger("logger")
 # CONFIG — edit these for your environment
 # ==========================================================
 BEACON_ADDRESS = "https://realtime.us.beacon.1.api.bluecity.ai/"
-BASE_DIR = "./data/rt/"
+BASE_DIR = str(_MODULE_DIR / "data" / "rt")
 FLUSH_INTERVAL_S = 60
 COMPRESSION = "zstd"
 COMPRESSION_LEVEL = 3

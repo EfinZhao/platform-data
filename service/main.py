@@ -1,18 +1,43 @@
 import asyncio
+import sys
+import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import bct_client
 import database
 import emailer
 import history
+import pandas as pd
 from fastapi import FastAPI
 from routers import history as history_router
 from routers import sensor
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "logging"))
+import logger_rt  # path must be set up before this import
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+UDID_CSV = REPO_ROOT / "udid.csv"
+LOGGER_START_STAGGER_S = 10  # matches logging/run_rt.py
+
 UPDATE_INTERVAL = 900 # 15 minutes
 
 _first_update_done = asyncio.Event()
+
+
+def _start_loggers():
+    sensors = pd.read_csv(UDID_CSV)
+    for row in sensors.itertuples(index=False):
+        intersection_id = f"{row.major}_{row.minor}"
+        t = threading.Thread(
+            target=logger_rt.logger,
+            args=(intersection_id, row.UDID),
+            daemon=True,
+        )
+        t.start()
+        time.sleep(LOGGER_START_STAGGER_S)
 
 
 async def update_loop():
@@ -100,6 +125,7 @@ async def daily_email():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.init_db()
+    threading.Thread(target=_start_loggers, daemon=True).start()
     asyncio.create_task(update_loop())
     asyncio.create_task(daily_email())
     yield
