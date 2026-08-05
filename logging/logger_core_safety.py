@@ -32,7 +32,7 @@ with open(".secrets.toml", "rb") as file:
 USERNAME = secrets["username"]
 PASSWORD = secrets["password"]
 
-UDID_CSV = "udid.csv"  # headers: UDID,major,minor,authority,lat,lon,rotation
+UDID_CSV = "../udid.csv"  # headers: UDID,major,minor,authority,lat,lon,rotation
 OUTPUT_DIR = Path("data/core_safety")
 TIMEZONE = "US/Pacific"
 
