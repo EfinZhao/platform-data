@@ -1,12 +1,17 @@
-from dotenv import load_dotenv
-import os
+import tomllib
+from pathlib import Path
 
-load_dotenv()
+# Single shared credentials file — same one logging/logger_rt.py reads.
+_SECRETS_PATH = Path(__file__).resolve().parent.parent / "logging" / ".secrets.toml"
 
-BCT_USERNAME = os.getenv("BCT_API_USERNAME")
-BCT_PASSWORD = os.getenv("BCT_API_password")
+with open(_SECRETS_PATH, "rb") as f:
+    _secrets = tomllib.load(f)
+
+BCT_USERNAME = _secrets.get("username")
+BCT_PASSWORD = _secrets.get("password")
 BCT_BEACON_ADDRESS = "https://realtime.us.beacon.1.api.bluecity.ai/"
 
-SENDER_EMAIL    = os.getenv("SENDER_EMAIL")
-SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
-RECEIVER_EMAIL  = os.getenv("RECIEVER_EMAIL")  # typo preserved from .env
+_email = _secrets.get("email", {})
+SENDER_EMAIL    = _email.get("sender")
+SENDER_PASSWORD = _email.get("sender_password")
+RECEIVER_EMAIL  = _email.get("receiver")
