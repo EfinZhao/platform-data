@@ -8,7 +8,7 @@ from logger_rt import logger
 def main():
     threads = []
 
-    data = pd.read_csv("udid.csv")
+    data = pd.read_csv("../udid.csv")
     for row in data.itertuples(index=False):
        t = threading.Thread(target = logger, args=(f"{row.major}_{row.minor}", row.UDID), daemon=True)
        threads.append(t)
