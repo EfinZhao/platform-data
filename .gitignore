@@ -22,5 +22,16 @@ ping_log*
 latency_processed.csv
 /logging/data/*
 
+# service (backend)
+.env
+bct.db
+*.db-wal
+*.db-shm
+
+# frontend
+node_modules
+dist-ssr
+*.local
+
 # misc
 .DS_Store
