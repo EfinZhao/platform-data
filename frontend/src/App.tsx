@@ -107,6 +107,8 @@ const sortEntries = (
   })
 }
 
+const RAW_DATA_URL = `${window.location.protocol}//${window.location.hostname}:8000/`
+
 const App = () => {
   const [sensors, setSensors] = useState<SensorsResponse>({})
   const [loading, setLoading] = useState(true)
@@ -208,6 +210,14 @@ const App = () => {
             )}
           </div>
           <div className="flex items-center gap-3">
+            <a
+              href={RAW_DATA_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-md border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Browse raw data ↗
+            </a>
             <div className="flex items-center gap-2">
               <label htmlFor="retention-select" className="text-sm text-gray-500 whitespace-nowrap">
                 History window

@@ -1,0 +1,16 @@
+[Unit]
+Description=platform-data merged service — sensor loggers + dashboard API + frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=REPLACE_ME
+Group=REPLACE_ME
+WorkingDirectory=/opt/platform-data/service
+ExecStart=/opt/platform-data/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8001
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

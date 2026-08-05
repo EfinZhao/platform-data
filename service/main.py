@@ -12,6 +12,7 @@ import emailer
 import history
 import pandas as pd
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from routers import history as history_router
 from routers import sensor
 
@@ -132,10 +133,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-app.include_router(sensor.router)
-app.include_router(history_router.router)
+app.include_router(sensor.router, prefix="/api")
+app.include_router(history_router.router, prefix="/api")
 
 
 @app.get("/health")
 async def health():
     return {"status": "200 OK"}
+
+
+_FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
