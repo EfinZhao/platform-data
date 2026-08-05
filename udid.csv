@@ -1,5 +1,6 @@
 UDID,major,minor,authority,lat,lon,rotation
 BCT_3D_4G_0207024,E-Peltason,Anteater,UCI
+BCT_VS_4G_0207024,E-Peltason,Anteater,UCI
 BCT_3D_VS_0207024,E-Peltason,Anteater,UCI
 BCT_3D_4G_0207025,E-Peltason,Anteater,UCI
 BCT_3D_4G_0207032,E-Peltason,Pereira,UCI
@@ -15,15 +16,11 @@ BCT_3D_4G_0207030,Health-Sciences,Michael-Drake,UCI
 BCT_3D_4G_0207035,California,Michael-Drake,UCI
 BCT_3D_4G_0207001,Campus,Cornell,COI,33.6485,-117.832472,-103.0
 BCT_3D_4G_0207055,Culver,University,COI,33.6571664,-117.8280232,-88.5
-BCT_3D_4G_0207007,Culver,University,COI
 BCT_VS_4G_0207002,Culver,University,COI
-BCT_3D_4G_0207002,Culver,University,COI
 BCT_3D_4G_0207004,University,Campus,COI
 BCT_3D_4G_0207006,University,Campus,COI
 BCT_VS_4G_0207004,University,Campus,COI
 BCT_3D_4G_0207057,Campus,W-Peltason,COI
-BCT_3D_4G_0207059,Campus,W-Peltason,COI
-BCT_3D_4G_0207009,Campus,W-Peltason,COI
 BCT_3D_4G_0207003,Campus,E-Peltason,COI
 BCT_3D_4G_0207005,Campus,E-Peltason,COI
 BCT_VS_4G_0207003,Campus,E-Peltason,COI
@@ -32,8 +29,6 @@ BCT_3D_4G_0207015,Culver,Campus,COI
 BCT_3D_VS_0207008,Culver,Campus,COI
 BCT_3D_4G_0207054,Campus,California,COI
 BCT_3D_4G_0207018,Campus,California,COI
-BCT_3D_VS_0207017,Campus,California,COI
-BCT_3D_4G_0207017,Campus,California,COI
 BCT_3D_4G_0207016,Campus,Stanford,COI
 BCT_3D_4G_0207014,Culver,Anteater,COI
 BCT_3D_4G_0207010,Culver,Anteater,COI
@@ -44,11 +39,7 @@ BCT_3D_4G_0207012,Culver,Harvard,COI
 BCT_VS_4G_0207012,Culver,Harvard,COI
 OBC-AG-SA-B972370,Culver,Michelson,COI,33.665756,-117.826501,180
 BCT_3D_4G_0207020,Culver,Michelson,COI
-BCT_3D_4G_0207037,Culver,Michelson,COI
 OBC-AG-SA-C251065,University,Harvard,COI,33.657632,-117.838812,180
-BCT_3D_4G_0207036,University,Harvard,COI
-BCT_3D_4G_0207029,University,Harvard,COI
-BCT_VS_4G_0207029,University,Harvard,COI
 BCT_3D_4G_0207021,University,California,COI
 BCT_3D_4G_0207022,University,Mesa,COI
 BCT_3D_4G_0207023,Harvard,Bridge,COI
