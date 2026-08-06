@@ -13,7 +13,7 @@ import zipfile
 import pandas as pd
 
 PORT = 8000
-DIRECTORY = "rt"
+DIRECTORY = "data/rt"
 
 class SubdirectoryHandler(http.server.SimpleHTTPRequestHandler):
   def __init__(self, *args, **kwargs):
