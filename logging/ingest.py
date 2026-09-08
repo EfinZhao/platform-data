@@ -1,4 +1,5 @@
 import logging
+import queue
 import threading
 import time
 from datetime import datetime, timezone
@@ -25,11 +26,38 @@ STREAM_SCHEMAS = {
 
 DEFAULT_DRAIN_TIMEOUT_S = 30.0
 
+# Batches, not rows. Measured steady-state depth with interleaved draining is
+# tens of items, so this is a wide safety margin, not a working size.
+QUEUE_MAXSIZE = 10000
+
+# How long the writer blocks on an empty queue before re-checking the flush
+# deadline. Bounds how late a flush can fire.
+QUEUE_POLL_SECONDS = 0.1
+
+# How often the supervisor checks that the writer thread is still alive.
+WRITER_WATCHDOG_SECONDS = 5.0
+
 
 class WriterService:
-    def __init__(self):
+    # The single consumer. Collectors are producers and never touch a Buffer.
+    # One thread drains the queue and, once per FLUSH_INTERVAL_S, writes every
+    # buffer out. Disk write concurrency is 1 by construction, which is what
+    # makes the startup stagger unnecessary. Buffer.add and Buffer.flush also
+    # run on the same thread now, so they no longer contend.
+
+    def __init__(self, *, queue_maxsize: int = QUEUE_MAXSIZE):
+        self.queue: queue.Queue = queue.Queue(maxsize=queue_maxsize)
         self._buffers: dict[tuple[str, str], Buffer] = {}
         self._lock = threading.Lock()
+
+        self._thread: threading.Thread | None = None
+        self._running = threading.Event()
+
+        self.dropped_batches = 0
+        self.dropped_rows = 0
+        self.flush_count = 0
+        self.last_flush_seconds = 0.0
+        self._last_drop_log = 0.0
 
     def register(self, intersection_id: str) -> None:
         with self._lock:
@@ -38,27 +66,122 @@ class WriterService:
                 if key not in self._buffers:
                     self._buffers[key] = Buffer(schema, stream, intersection_id)
 
-    def add(self, intersection_id: str, stream: str, row: dict) -> None:
-        self._buffers[(intersection_id, stream)].add(row)
+    # ------------------------------------------------------
+    # Producer side
+    # ------------------------------------------------------
+    def submit(self, intersection_id: str, stream: str, rows: list) -> bool:
+        # One queue item per message, not per row, so queue traffic tracks the
+        # message rate (~800/s at 44 sensors) not the row rate (~28,600/s).
+        #
+        # Never blocks: a blocked collector stalls get_hyperparameter, pushing
+        # the loss upstream into the SDK cache where it cannot be counted.
+        try:
+            self.queue.put_nowait((intersection_id, stream, rows))
+            return True
+        except queue.Full:
+            self.dropped_batches += 1
+            self.dropped_rows += len(rows)
+            now = time.monotonic()
+            if now - self._last_drop_log > 10:
+                self._last_drop_log = now
+                log.error(
+                    f"Writer queue full ({self.queue.qsize()} items) -- dropped "
+                    f"{self.dropped_batches} batches / {self.dropped_rows} rows so far"
+                )
+            return False
 
-    def flush_intersection(self, intersection_id: str) -> None:
-        for stream in STREAM_SCHEMAS:
+    # ------------------------------------------------------
+    # Consumer side
+    # ------------------------------------------------------
+    def start(self) -> None:
+        if self.is_alive():
+            return
+        self._running.set()
+        self._thread = threading.Thread(
+            target=self._run, name="ingest-writer", daemon=True
+        )
+        self._thread.start()
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def _run(self) -> None:
+        next_flush = time.monotonic() + logger_rt.FLUSH_INTERVAL_S
+        while self._running.is_set():
+            try:
+                self._drain(timeout=QUEUE_POLL_SECONDS)
+                if time.monotonic() >= next_flush:
+                    self.flush_all()
+                    # Fixed cadence rather than "60s after the last flush ended",
+                    # so a slow flush does not drag every later file later too.
+                    next_flush += logger_rt.FLUSH_INTERVAL_S
+                    if time.monotonic() >= next_flush:
+                        next_flush = time.monotonic() + logger_rt.FLUSH_INTERVAL_S
+            except Exception as e:
+                # The single writer must not die on a transient error.
+                log.error(f"Writer loop error: {e}", exc_info=True)
+                time.sleep(0.5)
+
+    def _drain(self, *, timeout: float | None = None) -> int:
+        try:
+            if timeout:
+                item = self.queue.get(timeout=timeout)
+            else:
+                item = self.queue.get_nowait()
+        except queue.Empty:
+            return 0
+
+        moved = 0
+        while True:
+            intersection_id, stream, rows = item
             buffer = self._buffers.get((intersection_id, stream))
             if buffer is not None:
-                buffer.flush()
+                for row in rows:
+                    buffer.add(row)
+            moved += 1
+            try:
+                item = self.queue.get_nowait()
+            except queue.Empty:
+                return moved
 
     def flush_all(self) -> None:
+        started = time.perf_counter()
         with self._lock:
             keys = list(self._buffers)
+
         for key in keys:
             try:
                 self._buffers[key].flush()
             except Exception as e:
                 log.error(f"Flush failed for {key}: {e}")
+            # Drain between files. Without this the queue has to absorb the
+            # whole flush pass; with it, depth stays near one file's worth.
+            self._drain()
 
+        self.flush_count += 1
+        self.last_flush_seconds = time.perf_counter() - started
+        log.info(
+            f"Flushed {len(keys)} buffers in {self.last_flush_seconds:.2f}s "
+            f"(queue depth {self.queue.qsize()})"
+        )
+
+    def stop(self, *, drain_timeout: float = 15.0) -> None:
+        self._running.clear()
+        if self._thread is not None:
+            self._thread.join(timeout=drain_timeout)
+
+        deadline = time.monotonic() + drain_timeout
+        while self._drain() and time.monotonic() < deadline:
+            pass
+        self.flush_all()
+
+    # ------------------------------------------------------
     def pending_rows(self) -> int:
         with self._lock:
             return sum(buffer.rows for buffer in self._buffers.values())
+
+    def queue_depth(self) -> int:
+        return self.queue.qsize()
 
 
 class Collector:
@@ -68,7 +191,6 @@ class Collector:
         self.writer = writer
         self.running = False
         self.stream = None
-        self.flush_thread = None
 
         self.msg_count = 0
         self.frame_count = 0
@@ -102,9 +224,6 @@ class Collector:
             ],
         )
         log.info("Connected. Receiving messages...")
-
-        self.flush_thread = threading.Thread(target=self._flush_loop, daemon=True)
-        self.flush_thread.start()
 
         self._receive_loop()
 
@@ -151,8 +270,8 @@ class Collector:
             objects = msg.frame.objects
             if len(objects) > 0:
                 num_objects = len(objects)
-                for obj in objects:
-                    self.writer.add(self.intersection_id, "objects", {
+                self.writer.submit(self.intersection_id, "objects", [
+                    {
                         "intersection_id": self.intersection_id,
                         "recv_timestamp": now,
                         "frame_timestamp": frame_ts,
@@ -164,7 +283,9 @@ class Collector:
                         "rotation": obj.rotation,
                         "class_type": obj.classType,
                         "objects_in_frame": num_objects,
-                    })
+                    }
+                    for obj in objects
+                ])
                 self.frame_count += 1
                 self.last_frame_ts = now_dt
         except AttributeError:
@@ -174,8 +295,8 @@ class Collector:
         try:
             phases = msg.phaseChange.phases
             if len(phases) > 0:
-                for phase in phases:
-                    self.writer.add(self.intersection_id, "phase_changes", {
+                self.writer.submit(self.intersection_id, "phase_changes", [
+                    {
                         "intersection_id": self.intersection_id,
                         "recv_timestamp": now,
                         "phase_number": phase.phaseNumber,
@@ -183,7 +304,9 @@ class Collector:
                         "phase_timestamp": (
                             phase.timestamp if phase.timestamp else now
                         ),
-                    })
+                    }
+                    for phase in phases
+                ])
                 self.phase_change_count += 1
                 self.last_phase_ts = now_dt
         except AttributeError:
@@ -193,8 +316,8 @@ class Collector:
         try:
             occupancies = msg.occupancyChange.occupancies
             if len(occupancies) > 0:
-                for occupancy in occupancies:
-                    self.writer.add(self.intersection_id, "occupancy_changes", {
+                self.writer.submit(self.intersection_id, "occupancy_changes", [
+                    {
                         "intersection_id": self.intersection_id,
                         "recv_timestamp": now,
                         "phase_number": occupancy.phaseLabel,
@@ -202,7 +325,9 @@ class Collector:
                         "phase_timestamp": (
                             occupancy.timestamp if occupancy.timestamp else now
                         ),
-                    })
+                    }
+                    for occupancy in occupancies
+                ])
                 self.occupancy_change_count += 1
         except AttributeError:
             pass
@@ -211,25 +336,20 @@ class Collector:
         try:
             phases = msg.phaseTimeToChange.phases
             if len(phases) > 0:
-                for phase in phases:
-                    self.writer.add(self.intersection_id, "phase_ttc", {
+                self.writer.submit(self.intersection_id, "phase_ttc", [
+                    {
                         "intersection_id": self.intersection_id,
                         "recv_timestamp": now,
                         "phase_number": phase.phaseNumber,
                         "min_time_to_change": phase.minTimeToChange,
                         "max_time_to_change": phase.maxTimeToChange,
-                    })
+                    }
+                    for phase in phases
+                ])
                 self.phase_ttc_count += 1
                 self.last_ttc_ts = now_dt
         except AttributeError:
             pass
-
-    # ------------------------------------------------------
-    def _flush_loop(self) -> None:
-        while self.running:
-            time.sleep(logger_rt.FLUSH_INTERVAL_S)
-            if self.running:
-                self.writer.flush_intersection(self.intersection_id)
 
 
 class IngestService:
@@ -251,14 +371,39 @@ class IngestService:
 
         self._threads: list[threading.Thread] = []
         self._launcher = None
+        self._supervisor = None
         self._stopped = threading.Event()
+        self.writer_restarts = 0
 
     # ------------------------------------------------------
     def start(self) -> None:
+        # Writer first: collectors submit as soon as they connect, and a batch
+        # submitted before the writer is draining would sit in the queue.
+        self.writer.start()
+
+        self._supervisor = threading.Thread(
+            target=self._supervise, name="ingest-supervisor", daemon=True
+        )
+        self._supervisor.start()
+
         self._launcher = threading.Thread(
             target=self._launch_all, name="ingest-launcher", daemon=True
         )
         self._launcher.start()
+
+    def _supervise(self) -> None:
+        # One writer means one point of failure: if it dies, every sensor stops
+        # being written and the collectors carry on as if nothing is wrong.
+        # Buffers live on the WriterService, not the thread, so a restart keeps
+        # whatever was already buffered.
+        while not self._stopped.wait(WRITER_WATCHDOG_SECONDS):
+            if not self.writer.is_alive():
+                self.writer_restarts += 1
+                log.error(
+                    f"Writer thread is dead -- restarting "
+                    f"(restart #{self.writer_restarts})"
+                )
+                self.writer.start()
 
     def _launch_all(self) -> None:
         for index, (intersection_id, udid) in enumerate(self.sensors):
@@ -312,9 +457,20 @@ class IngestService:
                 break
             thread.join(timeout=remaining)
 
+        # Collectors are done submitting, so the writer can drain what is left
+        # and write everything out.
         pending = self.writer.pending_rows()
-        log.info(f"Final flush of {pending} buffered rows...")
-        self.writer.flush_all()
+        log.info(
+            f"Final flush: {pending} buffered rows, "
+            f"{self.writer.queue_depth()} queued batches"
+        )
+        self.writer.stop(drain_timeout=drain_timeout)
+
+        if self.writer.dropped_batches:
+            log.error(
+                f"Dropped {self.writer.dropped_batches} batches / "
+                f"{self.writer.dropped_rows} rows over this run"
+            )
         log.info("Ingest stopped.")
 
     def wait(self, timeout: float | None = None) -> bool:
@@ -333,6 +489,12 @@ class IngestService:
             "collectors_started": len(self.collectors),
             "collectors_alive": alive,
             "pending_rows": self.writer.pending_rows(),
+            "queue_depth": self.writer.queue_depth(),
+            "writer_alive": self.writer.is_alive(),
+            "writer_restarts": self.writer_restarts,
+            "dropped_batches": self.writer.dropped_batches,
+            "dropped_rows": self.writer.dropped_rows,
+            "last_flush_seconds": round(self.writer.last_flush_seconds, 3),
             "messages": sum(c.msg_count for c in self.collectors),
             "frames": sum(c.frame_count for c in self.collectors),
             "phase_changes": sum(c.phase_change_count for c in self.collectors),
