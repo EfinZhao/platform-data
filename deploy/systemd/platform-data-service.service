@@ -12,5 +12,11 @@ ExecStart=/opt/platform-data/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 80
 Restart=on-failure
 RestartSec=5
 
+# On shutdown the ingest service stops its collectors and flushes every buffer,
+# so up to a minute of data per sensor is written during stop. This must exceed
+# main.INGEST_DRAIN_TIMEOUT_S (30s) or systemd SIGKILLs the process mid-flush
+# and the data is lost -- which is exactly what used to happen.
+TimeoutStopSec=90
+
 [Install]
 WantedBy=multi-user.target

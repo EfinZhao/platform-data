@@ -35,3 +35,7 @@ dist-ssr
 
 # misc
 .DS_Store
+
+# local-only analysis + load-test scaffolding, not part of the runtime
+tools/
+profiles/

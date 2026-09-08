@@ -1,7 +1,5 @@
 import asyncio
 import sys
-import threading
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,35 +8,26 @@ import bct_client
 import database
 import emailer
 import history
-import pandas as pd
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from routers import history as history_router
 from routers import sensor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "logging"))
-import logger_rt  # path must be set up before this import
+from ingest import IngestService, sensors_from_csv  # path must be set up first
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UDID_CSV = REPO_ROOT / "udid.csv"
-LOGGER_START_STAGGER_S = 10  # matches logging/run_rt.py
+LOGGER_START_STAGGER_S = 10
+
+# Long enough for receive loops to return from get_hyperparameter and for the
+# final flush to finish. The systemd unit's TimeoutStopSec must exceed it or
+# the process is killed mid-flush.
+INGEST_DRAIN_TIMEOUT_S = 30
 
 UPDATE_INTERVAL = 900 # 15 minutes
 
 _first_update_done = asyncio.Event()
-
-
-def _start_loggers():
-    sensors = pd.read_csv(UDID_CSV)
-    for row in sensors.itertuples(index=False):
-        intersection_id = f"{row.major}_{row.minor}"
-        t = threading.Thread(
-            target=logger_rt.logger,
-            args=(intersection_id, row.UDID),
-            daemon=True,
-        )
-        t.start()
-        time.sleep(LOGGER_START_STAGGER_S)
 
 
 async def update_loop():
@@ -126,10 +115,24 @@ async def daily_email():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.init_db()
-    threading.Thread(target=_start_loggers, daemon=True).start()
+
+    # start() returns immediately; sensors come up on a launcher thread.
+    app.state.ingest = IngestService(
+        sensors_from_csv(UDID_CSV),
+        stagger_seconds=LOGGER_START_STAGGER_S,
+    )
+    app.state.ingest.start()
+
     asyncio.create_task(update_loop())
     asyncio.create_task(daily_email())
+
     yield
+
+    # Previously absent, so every restart discarded up to a minute of buffered
+    # data from every sensor.
+    await asyncio.to_thread(
+        lambda: app.state.ingest.stop(drain_timeout=INGEST_DRAIN_TIMEOUT_S)
+    )
 
 
 app = FastAPI(lifespan=lifespan)

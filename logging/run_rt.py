@@ -1,26 +1,48 @@
-import threading
-import time
+#!/usr/bin/env python3
 
-import pandas as pd
-from logger_rt import logger
+import logging
+import signal
+import sys
+from pathlib import Path
+
+from ingest import IngestService, sensors_from_csv
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+UDID_CSV = REPO_ROOT / "udid.csv"
+
+STAGGER_SECONDS = 10.0
+STATUS_INTERVAL_S = 30.0
+
+log = logging.getLogger("logger")
 
 
 def main():
-    threads = []
+    sensors = sensors_from_csv(UDID_CSV)
+    log.info(f"Loaded {len(sensors)} sensors from {UDID_CSV}")
 
-    data = pd.read_csv("../udid.csv")
-    for row in data.itertuples(index=False):
-       t = threading.Thread(target = logger, args=(f"{row.major}_{row.minor}", row.UDID), daemon=True)
-       threads.append(t)
-       t.start()
-       time.sleep(10)
+    service = IngestService(sensors, stagger_seconds=STAGGER_SECONDS)
 
+    def shutdown(signum, _frame):
+        log.info(f"Signal {signum} received, shutting down...")
+        service.stop()
+        sys.exit(0)
 
-    while True:
-        for t in threads:
-            print(t.is_alive())
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
 
-        time.sleep(5)
+    service.start()
+
+    try:
+        while not service.wait(STATUS_INTERVAL_S):
+            stats = service.stats()
+            log.info(
+                f"alive {stats['collectors_alive']}/{stats['collectors_started']} "
+                f"of {stats['sensors_configured']}  "
+                f"msgs={stats['messages']}  buffered={stats['pending_rows']}"
+            )
+    except KeyboardInterrupt:
+        service.stop()
+
 
 if __name__ == "__main__":
     main()
