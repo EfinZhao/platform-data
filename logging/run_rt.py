@@ -10,7 +10,6 @@ from ingest import IngestService, sensors_from_csv
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UDID_CSV = REPO_ROOT / "udid.csv"
 
-STAGGER_SECONDS = 10.0
 STATUS_INTERVAL_S = 30.0
 
 log = logging.getLogger("logger")
@@ -20,7 +19,7 @@ def main():
     sensors = sensors_from_csv(UDID_CSV)
     log.info(f"Loaded {len(sensors)} sensors from {UDID_CSV}")
 
-    service = IngestService(sensors, stagger_seconds=STAGGER_SECONDS)
+    service = IngestService(sensors)
 
     def shutdown(signum, _frame):
         log.info(f"Signal {signum} received, shutting down...")
@@ -36,9 +35,9 @@ def main():
         while not service.wait(STATUS_INTERVAL_S):
             stats = service.stats()
             log.info(
-                f"alive {stats['collectors_alive']}/{stats['collectors_started']} "
-                f"of {stats['sensors_configured']}  "
-                f"msgs={stats['messages']}  buffered={stats['pending_rows']}"
+                f"connected {stats['collectors_connected']}/{stats['sensors_configured']}  "
+                f"msgs={stats['messages']}  buffered={stats['pending_rows']}  "
+                f"queue={stats['queue_depth']}  dropped={stats['dropped_rows']}"
             )
     except KeyboardInterrupt:
         service.stop()

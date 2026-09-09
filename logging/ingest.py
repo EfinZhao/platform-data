@@ -37,6 +37,17 @@ QUEUE_POLL_SECONDS = 0.1
 # How often the supervisor checks that the writer thread is still alive.
 WRITER_WATCHDOG_SECONDS = 5.0
 
+# Collectors all start at once, but only this many may be *connecting* at a
+# time. The stagger is gone because disk write concurrency is now 1 by
+# construction; this limit exists for a different reason -- every connect POSTs
+# core.api.bluecity.ai/api/token/ and the SDK retries in a blocking
+# `while not self.getToken(): time.sleep(20)` loop, so 44 simultaneous auths
+# risk being rate limited with no way to tell that is what happened.
+CONNECT_CONCURRENCY = 8
+
+# Cap on how long callers wait for every collector to finish connecting.
+READY_TIMEOUT_S = 120.0
+
 
 class WriterService:
     # The single consumer. Collectors are producers and never touch a Buffer.
@@ -185,11 +196,14 @@ class WriterService:
 
 
 class Collector:
-    def __init__(self, intersection_id: str, udid: str, writer: WriterService):
+    def __init__(self, intersection_id: str, udid: str, writer: WriterService,
+                 connect_semaphore: threading.Semaphore | None = None):
         self.intersection_id = intersection_id
         self.udid = udid
         self.writer = writer
+        self.connect_semaphore = connect_semaphore
         self.running = False
+        self.connected = False
         self.stream = None
 
         self.msg_count = 0
@@ -208,27 +222,39 @@ class Collector:
         self.writer.register(self.intersection_id)
 
         log.info(
-            f"Connecting to {logger_rt.BEACON_ADDRESS} (UDID={self.udid})..."
+            f"[{self.intersection_id}] connecting to {logger_rt.BEACON_ADDRESS} "
+            f"(UDID={self.udid})..."
         )
-        self.stream = BCTWSConnection(
-            UDID=self.udid,
-            username=logger_rt.secrets["username"],
-            password=logger_rt.secrets["password"],
-            beaconAddress=logger_rt.BEACON_ADDRESS,
-            singleton=True,
-            subscriptions=[
-                BCTWSConnection.subscriptionOption.FRAME,
-                BCTWSConnection.subscriptionOption.PHASE_CHANGE,
-                BCTWSConnection.subscriptionOption.PHASE_TIME_TO_CHANGE,
-                BCTWSConnection.subscriptionOption.LOOP_CHANGE,
-            ],
-        )
-        log.info("Connected. Receiving messages...")
+        # Held only across the connect, never across the receive loop, which
+        # never returns.
+        if self.connect_semaphore is not None:
+            self.connect_semaphore.acquire()
+        try:
+            self.stream = BCTWSConnection(
+                UDID=self.udid,
+                username=logger_rt.secrets["username"],
+                password=logger_rt.secrets["password"],
+                beaconAddress=logger_rt.BEACON_ADDRESS,
+                singleton=True,
+                subscriptions=[
+                    BCTWSConnection.subscriptionOption.FRAME,
+                    BCTWSConnection.subscriptionOption.PHASE_CHANGE,
+                    BCTWSConnection.subscriptionOption.PHASE_TIME_TO_CHANGE,
+                    BCTWSConnection.subscriptionOption.LOOP_CHANGE,
+                ],
+            )
+        finally:
+            if self.connect_semaphore is not None:
+                self.connect_semaphore.release()
+
+        self.connected = True
+        log.info(f"[{self.intersection_id}] connected. Receiving messages...")
 
         self._receive_loop()
 
     def stop(self) -> None:
         self.running = False
+        self.connected = False
         log.info(
             f"[{self.intersection_id}] stopped. Totals: {self.msg_count} msgs, "
             f"{self.frame_count} frames, "
@@ -356,19 +382,19 @@ class IngestService:
     """Owns the writer and every collector. The single thing both entry points
     construct.
 
-    start() returns immediately; sensors come up on a background launcher
-    thread, staggered. stop() halts collectors and flushes what they have
-    buffered, which is what keeps a restart from discarding up to a minute of
-    data per sensor.
+    start() returns immediately; every collector comes up at once on a
+    background launcher thread, with connect concurrency bounded by a
+    semaphore. stop() halts collectors, drains the queue and flushes, which is
+    what keeps a restart from discarding up to a minute of data per sensor.
     """
 
-    def __init__(self, sensors, *, stagger_seconds: float = 10.0):
+    def __init__(self, sensors, *, connect_concurrency: int = CONNECT_CONCURRENCY):
         # sensors: iterable of (intersection_id, udid)
         self.sensors = list(sensors)
-        self.stagger_seconds = stagger_seconds
         self.writer = WriterService()
         self.collectors: list[Collector] = []
 
+        self._connect_semaphore = threading.Semaphore(connect_concurrency)
         self._threads: list[threading.Thread] = []
         self._launcher = None
         self._supervisor = None
@@ -406,17 +432,19 @@ class IngestService:
                 self.writer.start()
 
     def _launch_all(self) -> None:
-        for index, (intersection_id, udid) in enumerate(self.sensors):
+        # No stagger. Every collector starts now; the semaphore inside
+        # Collector.start bounds how many connect at once.
+        for intersection_id, udid in self.sensors:
             if self._stopped.is_set():
                 return
             self._spawn(intersection_id, udid)
-            if self.stagger_seconds and index < len(self.sensors) - 1:
-                if self._stopped.wait(self.stagger_seconds):
-                    return
         log.info(f"All {len(self.sensors)} collectors launched.")
 
     def _spawn(self, intersection_id: str, udid: str) -> None:
-        collector = Collector(intersection_id, udid, self.writer)
+        collector = Collector(
+            intersection_id, udid, self.writer,
+            connect_semaphore=self._connect_semaphore,
+        )
         self.collectors.append(collector)
 
         # Registered before start(), as the previous design did, so the status
@@ -473,6 +501,33 @@ class IngestService:
             )
         log.info("Ingest stopped.")
 
+    def connected_count(self) -> int:
+        return sum(1 for c in self.collectors if c.connected)
+
+    def wait_ready(self, *, timeout: float = READY_TIMEOUT_S) -> bool:
+        """Block until every sensor has connected, or timeout. Returns whether
+        all of them made it.
+
+        Callers that report sensor health need this: a status pass run before
+        the collectors are up sees empty freshness timestamps and marks healthy
+        sensors down.
+        """
+        deadline = time.monotonic() + timeout
+        expected = len(self.sensors)
+        while time.monotonic() < deadline:
+            if self._stopped.is_set():
+                return False
+            if len(self.collectors) == expected and self.connected_count() == expected:
+                log.info(f"All {expected} collectors connected.")
+                return True
+            time.sleep(0.5)
+
+        log.warning(
+            f"Only {self.connected_count()}/{expected} collectors connected "
+            f"within {timeout:.0f}s; continuing anyway."
+        )
+        return False
+
     def wait(self, timeout: float | None = None) -> bool:
         """Block until stop() is called. Returns True if it has been.
 
@@ -488,6 +543,7 @@ class IngestService:
             "sensors_configured": len(self.sensors),
             "collectors_started": len(self.collectors),
             "collectors_alive": alive,
+            "collectors_connected": self.connected_count(),
             "pending_rows": self.writer.pending_rows(),
             "queue_depth": self.writer.queue_depth(),
             "writer_alive": self.writer.is_alive(),

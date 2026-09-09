@@ -18,8 +18,6 @@ from ingest import IngestService, sensors_from_csv  # path must be set up first
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UDID_CSV = REPO_ROOT / "udid.csv"
-LOGGER_START_STAGGER_S = 10
-
 # Long enough for receive loops to return from get_hyperparameter and for the
 # final flush to finish. The systemd unit's TimeoutStopSec must exceed it or
 # the process is killed mid-flush.
@@ -30,7 +28,14 @@ UPDATE_INTERVAL = 900 # 15 minutes
 _first_update_done = asyncio.Event()
 
 
-async def update_loop():
+async def update_loop(service):
+    # The first status pass used to run seconds after boot, while collectors
+    # were still connecting. bct_client then read empty freshness timestamps and
+    # wrote frame/phase/ttc false for nearly every sensor, so the dashboard
+    # showed healthy sensors as down until the next 15 minute cycle -- and the
+    # daily email could be sent from that state.
+    await asyncio.to_thread(lambda: service.wait_ready())
+
     warmup_done = False
     while True:
         print("[INFO] Updating sensor statuses...")
@@ -117,13 +122,10 @@ async def lifespan(app: FastAPI):
     database.init_db()
 
     # start() returns immediately; sensors come up on a launcher thread.
-    app.state.ingest = IngestService(
-        sensors_from_csv(UDID_CSV),
-        stagger_seconds=LOGGER_START_STAGGER_S,
-    )
+    app.state.ingest = IngestService(sensors_from_csv(UDID_CSV))
     app.state.ingest.start()
 
-    asyncio.create_task(update_loop())
+    asyncio.create_task(update_loop(app.state.ingest))
     asyncio.create_task(daily_email())
 
     yield
