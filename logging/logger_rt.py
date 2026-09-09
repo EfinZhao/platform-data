@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,16 @@ BASE_DIR = str(_MODULE_DIR / "data" / "rt")
 FLUSH_INTERVAL_S = 60
 COMPRESSION = "zstd"
 COMPRESSION_LEVEL = 3
+
+# Ceiling on rows held in one Buffer between flushes. Normal peak is phase_ttc
+# at ~35,000 rows per 60s cycle, so this is roughly three cycles of headroom.
+#
+# It exists for the case where writes stop succeeding -- disk full, a bad mount,
+# permissions. flush() logs and returns, so without a cap the buffers grow until
+# the process is OOM-killed and everything buffered is lost. At the cap the
+# oldest rows are shed instead, which bounds the loss to the oldest data and
+# keeps the most recent.
+MAX_BUFFER_ROWS = 100_000
 
 
 # ==========================================================
@@ -85,27 +96,47 @@ RUNNING_LOGGERS: dict[str, "ingest.Collector"] = {}
 # BUFFER — accumulates rows, writes to Parquet on flush
 # ==========================================================
 class Buffer:
-    def __init__(self, schema, name, intersection_id):
+    def __init__(self, schema, name, intersection_id, max_rows=MAX_BUFFER_ROWS):
         self.schema = schema
         self.name = name
         self.intersection_id = intersection_id
+        self.max_rows = max_rows
         self.lock = threading.Lock()
         self.rows = 0
-        self._cols = {f.name: [] for f in schema}
+        self.dropped_rows = 0
+        # deque(maxlen) evicts the oldest on overflow, in O(1).
+        self._cols = {f.name: deque(maxlen=max_rows) for f in schema}
+        self._last_drop_log = 0.0
+
+    def _new_cols(self):
+        return {f.name: deque(maxlen=self.max_rows) for f in self.schema}
 
     def add(self, row):
         with self.lock:
+            at_cap = self.rows >= self.max_rows
             for col in self._cols:
                 self._cols[col].append(row.get(col))
-            self.rows += 1
+            if at_cap:
+                self.dropped_rows += 1
+                now = time.monotonic()
+                if now - self._last_drop_log > 30:
+                    self._last_drop_log = now
+                    log.error(
+                        f"[{self.intersection_id}/{self.name}] buffer at cap "
+                        f"({self.max_rows} rows) -- shedding oldest, "
+                        f"{self.dropped_rows} dropped so far. Writes are failing "
+                        f"or the writer is not draining."
+                    )
+            else:
+                self.rows += 1
 
     def flush(self):
         with self.lock:
             if self.rows == 0:
                 return None
-            data = self._cols
+            data = {name: list(col) for name, col in self._cols.items()}
             count = self.rows
-            self._cols = {f.name: [] for f in self.schema}
+            self._cols = self._new_cols()
             self.rows = 0
 
         table = pa.table(data, schema=self.schema)

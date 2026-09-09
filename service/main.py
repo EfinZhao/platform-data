@@ -25,6 +25,10 @@ INGEST_DRAIN_TIMEOUT_S = 30
 
 UPDATE_INTERVAL = 900 # 15 minutes
 
+# How often ingest health goes to the log. The endpoint is for looking; this is
+# so a problem is visible in the journal after the fact without one.
+INGEST_HEALTH_INTERVAL_S = 300
+
 _first_update_done = asyncio.Event()
 
 
@@ -74,6 +78,28 @@ async def update_loop(service):
         except Exception as e:
             print(f"[ERROR] Snapshot/alert failed: {e}")
         await asyncio.sleep(UPDATE_INTERVAL)
+
+
+async def ingest_health_loop(service):
+    while True:
+        await asyncio.sleep(INGEST_HEALTH_INTERVAL_S)
+        s = service.stats()
+        depth = s["queue_depth_percentiles"]
+        line = (
+            f"[INGEST] connected {s['collectors_connected']}/{s['sensors_configured']}  "
+            f"writer_alive={s['writer_alive']} restarts={s['writer_restarts']}  "
+            f"queue p50={depth['p50']} p99={depth['p99']} max={depth['max']}"
+            f"/{s['queue_maxsize']}  "
+            f"buffered={s['pending_rows']} (max {s['buffer_max_rows']}"
+            f"/{s['buffer_row_cap']})  "
+            f"flush last={s['last_flush_seconds']}s max={s['max_flush_seconds']}s"
+        )
+        dropped = s["dropped_rows_queue"] + s["dropped_rows_buffer"]
+        if dropped or not s["writer_alive"]:
+            print(f"[ERROR] {line}  DROPPED rows queue={s['dropped_rows_queue']} "
+                  f"buffer={s['dropped_rows_buffer']}")
+        else:
+            print(f"[INFO] {line}")
 
 
 REPORT_HOUR   = 23
@@ -127,6 +153,7 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(update_loop(app.state.ingest))
     asyncio.create_task(daily_email())
+    asyncio.create_task(ingest_health_loop(app.state.ingest))
 
     yield
 
@@ -145,6 +172,24 @@ app.include_router(history_router.router, prefix="/api")
 @app.get("/health")
 async def health():
     return {"status": "200 OK"}
+
+
+@app.get("/api/ingest")
+async def ingest_status():
+    """Ingest health: queue depth, flush cost, and anything dropped.
+
+    Without this there is no way to tell a healthy ingest from one that is
+    silently shedding rows -- the parquet files still appear, just with less in
+    them.
+    """
+    stats = app.state.ingest.stats()
+    stats["healthy"] = (
+        stats["writer_alive"]
+        and stats["dropped_rows_queue"] == 0
+        and stats["dropped_rows_buffer"] == 0
+        and stats["collectors_connected"] == stats["sensors_configured"]
+    )
+    return stats
 
 
 _FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"

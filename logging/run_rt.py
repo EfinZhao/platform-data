@@ -37,7 +37,8 @@ def main():
             log.info(
                 f"connected {stats['collectors_connected']}/{stats['sensors_configured']}  "
                 f"msgs={stats['messages']}  buffered={stats['pending_rows']}  "
-                f"queue={stats['queue_depth']}  dropped={stats['dropped_rows']}"
+                f"queue={stats['queue_depth']}  "
+                f"dropped={stats['dropped_rows_queue'] + stats['dropped_rows_buffer']}"
             )
     except KeyboardInterrupt:
         service.stop()

@@ -2,6 +2,7 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 import logger_rt
@@ -48,6 +49,10 @@ CONNECT_CONCURRENCY = 8
 # Cap on how long callers wait for every collector to finish connecting.
 READY_TIMEOUT_S = 120.0
 
+# Rolling window of queue-depth samples. Sampled after every drain, including
+# between files during a flush pass, which is where the peaks are.
+DEPTH_SAMPLE_WINDOW = 2000
+
 
 class WriterService:
     # The single consumer. Collectors are producers and never touch a Buffer.
@@ -68,7 +73,10 @@ class WriterService:
         self.dropped_rows = 0
         self.flush_count = 0
         self.last_flush_seconds = 0.0
+        self.max_flush_seconds = 0.0
+        self.last_flush_files = 0
         self._last_drop_log = 0.0
+        self._depth_samples: deque = deque(maxlen=DEPTH_SAMPLE_WINDOW)
 
     def register(self, intersection_id: str) -> None:
         with self._lock:
@@ -140,6 +148,7 @@ class WriterService:
             else:
                 item = self.queue.get_nowait()
         except queue.Empty:
+            self._depth_samples.append(0)
             return 0
 
         moved = 0
@@ -153,6 +162,7 @@ class WriterService:
             try:
                 item = self.queue.get_nowait()
             except queue.Empty:
+                self._depth_samples.append(self.queue.qsize())
                 return moved
 
     def flush_all(self) -> None:
@@ -171,6 +181,8 @@ class WriterService:
 
         self.flush_count += 1
         self.last_flush_seconds = time.perf_counter() - started
+        self.max_flush_seconds = max(self.max_flush_seconds, self.last_flush_seconds)
+        self.last_flush_files = len(keys)
         log.info(
             f"Flushed {len(keys)} buffers in {self.last_flush_seconds:.2f}s "
             f"(queue depth {self.queue.qsize()})"
@@ -193,6 +205,27 @@ class WriterService:
 
     def queue_depth(self) -> int:
         return self.queue.qsize()
+
+    def queue_depth_percentiles(self) -> dict:
+        samples = sorted(self._depth_samples)
+        if not samples:
+            return {"p50": 0, "p95": 0, "p99": 0, "max": 0, "samples": 0}
+
+        def at(q):
+            return samples[min(len(samples) - 1, int(len(samples) * q))]
+
+        return {
+            "p50": at(0.50), "p95": at(0.95), "p99": at(0.99),
+            "max": samples[-1], "samples": len(samples),
+        }
+
+    def buffer_dropped_rows(self) -> int:
+        with self._lock:
+            return sum(b.dropped_rows for b in self._buffers.values())
+
+    def buffer_max_rows(self) -> int:
+        with self._lock:
+            return max((b.rows for b in self._buffers.values()), default=0)
 
 
 class Collector:
@@ -545,12 +578,20 @@ class IngestService:
             "collectors_alive": alive,
             "collectors_connected": self.connected_count(),
             "pending_rows": self.writer.pending_rows(),
+            "buffer_max_rows": self.writer.buffer_max_rows(),
+            "buffer_row_cap": logger_rt.MAX_BUFFER_ROWS,
             "queue_depth": self.writer.queue_depth(),
+            "queue_maxsize": self.writer.queue.maxsize,
+            "queue_depth_percentiles": self.writer.queue_depth_percentiles(),
             "writer_alive": self.writer.is_alive(),
             "writer_restarts": self.writer_restarts,
-            "dropped_batches": self.writer.dropped_batches,
-            "dropped_rows": self.writer.dropped_rows,
+            "flush_count": self.writer.flush_count,
+            "last_flush_files": self.writer.last_flush_files,
             "last_flush_seconds": round(self.writer.last_flush_seconds, 3),
+            "max_flush_seconds": round(self.writer.max_flush_seconds, 3),
+            "dropped_batches": self.writer.dropped_batches,
+            "dropped_rows_queue": self.writer.dropped_rows,
+            "dropped_rows_buffer": self.writer.buffer_dropped_rows(),
             "messages": sum(c.msg_count for c in self.collectors),
             "frames": sum(c.frame_count for c in self.collectors),
             "phase_changes": sum(c.phase_change_count for c in self.collectors),
